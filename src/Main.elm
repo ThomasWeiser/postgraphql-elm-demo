@@ -2,6 +2,8 @@ module Main exposing (main)
 
 import Json.Decode exposing (Decoder)
 import Html exposing (Html)
+import Html.Attributes
+import Html.Events
 import Http
 
 
@@ -26,23 +28,33 @@ main =
 
 
 type alias Model =
-    { posts : Posts }
+    { searchString : String
+    , posts : Posts
+    }
 
 
 type Msg
-    = ApiResult (Result Http.Error Posts)
+    = SearchString String
+    | ApiResult (Result Http.Error Posts)
 
 
 init : ( Model, Cmd Msg )
 init =
-    ( { posts = [] }
-    , getAllPosts
+    ( { posts = []
+      , searchString = ""
+      }
+    , getSearchPosts ""
     )
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        SearchString string ->
+            ( { model | searchString = string }
+            , getSearchPosts string
+            )
+
         ApiResult (Ok posts) ->
             ( { model | posts = posts }
             , Cmd.none
@@ -58,10 +70,17 @@ update msg model =
 
 view : Model -> Html Msg
 view model =
-    Html.table [] <|
-        List.map
-            viewPost
-            model.posts
+    Html.div []
+        [ Html.input
+            [ Html.Attributes.placeholder "Search within posts"
+            , Html.Events.onInput SearchString
+            ]
+            []
+        , Html.table [] <|
+            List.map
+                viewPost
+                model.posts
+        ]
 
 
 viewPost : Post -> Html Msg
@@ -72,18 +91,17 @@ viewPost post =
         ]
 
 
-getAllPosts : Cmd Msg
-getAllPosts =
+getSearchPosts : String -> Cmd Msg
+getSearchPosts searchString =
     Http.post
         "http://localhost:5000/graphql"
-        (Http.stringBody "application/graphql" "query { allPosts { nodes { id summary } } }")
-        decoderAllPosts
+        (Http.stringBody "application/graphql" ("query { searchPosts(search: \"" ++ searchString ++ "\") { nodes { id summary } } }"))
+        (Json.Decode.at [ "data", "searchPosts", "nodes" ] decoderListOfPosts)
         |> Http.send ApiResult
 
 
-decoderAllPosts : Decoder Posts
-decoderAllPosts =
-    Json.Decode.at [ "data", "allPosts", "nodes" ] <|
+decoderListOfPosts : Decoder Posts
+decoderListOfPosts =
         Json.Decode.list <|
             Json.Decode.map2 Post
                 (Json.Decode.field "id" Json.Decode.int)
