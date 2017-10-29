@@ -11,18 +11,48 @@ import GraphQL.Request.Builder.Variable as GBVar
 import GraphQL.Client.Http as GraphQLClient
 
 
-type alias Post =
-    { id : Int
-    , summary : Maybe String
+type alias Cursor =
+    String
+
+
+type alias Page node =
+    { totalCount : Int
+    , pageInfo : PageInfo
+    , edges : List (Edge node)
     }
 
+
+type alias PageInfo =
+    { startCursor : Cursor
+    , endCursor : Cursor
+    }
+
+
+type alias Edge node =
+    { cursor : Cursor
+    , node : node
+    }
+
+
+type alias Model =
+    { searchString : String
+    , posts : Maybe (Page Post)
+    , persons : Maybe (Page Person)
+    }
 
 
 type alias Person =
     { id : Int
     , firstName : String
-    , posts : Maybe (List Post)
+    , posts : Maybe (Page Post)
     }
+
+
+type alias Post =
+    { id : Int
+    , summary : Maybe String
+    }
+
 
 queryPostByNodeId : GB.Document GB.Query Post { vars | nodeId : String }
 queryPostByNodeId =
@@ -39,26 +69,27 @@ queryPostByNodeId =
         |> GB.queryDocument
 
 
-valueSpecPosts : GB.ValueSpec GB.NonNull GB.ObjectType (List Post) vars
-valueSpecPosts =
+valueSpecPost : GB.ValueSpec GB.NonNull GB.ObjectType Post vars
+valueSpecPost =
     Post
         |> GB.object
         |> GB.with (GB.field "id" [] GB.int)
         |> GB.with (GB.field "summary" [] (GB.nullable GB.string))
-        |> connectionNodes
 
 
-queryAllPosts : GB.Document GB.Query (List Post) vars
+queryAllPosts : GB.Document GB.Query (Page Post) vars
 queryAllPosts =
-    valueSpecPosts
+    valueSpecPost
+        |> connectionPage
         |> GB.field "allPosts" []
         |> GB.extract
         |> GB.queryDocument
 
 
-querySearchPosts : GB.Document GB.Query (List Post) { vars | search : String }
+querySearchPosts : GB.Document GB.Query (Page Post) { vars | search : String }
 querySearchPosts =
-    valueSpecPosts
+    valueSpecPost
+        |> connectionPage
         |> GB.field "searchPosts"
             [ ( "search"
               , GBArg.variable <| GBVar.required "search" .search GBVar.string
@@ -68,44 +99,73 @@ querySearchPosts =
         |> GB.queryDocument
 
 
-queryAllPersons : GB.Document GB.Query (List Person) vars
+queryAllPersons : GB.Document GB.Query (Page Person) vars
 queryAllPersons =
     (\id firstName -> Person id firstName Nothing)
         |> GB.object
         |> GB.with (GB.field "id" [] GB.int)
         |> GB.with (GB.field "firstName" [] GB.string)
-        |> connectionNodes
+        |> connectionPage
         |> GB.field "allPeople" []
         |> GB.extract
         |> GB.queryDocument
 
 
-queryAllPersonsWithAllPosts : GB.Document GB.Query (List Person) vars
+queryAllPersonsWithAllPosts : GB.Document GB.Query (Page Person) vars
 queryAllPersonsWithAllPosts =
     Person
         |> GB.object
         |> GB.with (GB.field "id" [] GB.int)
         |> GB.with (GB.field "firstName" [] GB.string)
-        |> GB.with (GB.field "postsByAuthorId" [] <| GB.map Just valueSpecPosts)
-        |> connectionNodes
+        |> GB.with
+            (valueSpecPost
+                |> connectionPage
+                |> GB.map Just
+                |> GB.field "postsByAuthorId" []
+            )
+        |> connectionPage
         |> GB.field "allPeople" []
         |> GB.extract
         |> GB.queryDocument
 
 
-
-{-| A function that helps you extract node objects from paginated Relay connections.
+{-| Extract node objects from paginated Relay connections yielding  a plain list (without additional page- and cursor-info)
 -}
-connectionNodes :
+connectionList :
     GB.ValueSpec GB.NonNull GB.ObjectType result vars
     -> GB.ValueSpec GB.NonNull GB.ObjectType (List result) vars
-connectionNodes spec =
+connectionList spec =
     spec
         |> GB.field "node" []
         |> GB.extract
         |> GB.list
         |> GB.field "edges" []
         |> GB.extract
+
+
+{-| Extract node objects from paginated Relay connections yielding a Page type that includes all additional paging info
+-}
+connectionPage :
+    GB.ValueSpec GB.NonNull GB.ObjectType result vars
+    -> GB.ValueSpec GB.NonNull GB.ObjectType (Page result) vars
+connectionPage spec =
+    GB.object Page
+        |> GB.with (GB.field "totalCount" [] GB.int)
+        |> GB.with
+            (PageInfo
+                |> GB.object
+                |> GB.with (GB.field "startCursor" [] GB.string)
+                |> GB.with (GB.field "endCursor" [] GB.string)
+                |> GB.field "pageInfo" []
+            )
+        |> GB.with
+            (Edge
+                |> GB.object
+                |> GB.with (GB.field "cursor" [] GB.string)
+                |> GB.with (GB.field "node" [] spec)
+                |> GB.list
+                |> GB.field "edges" []
+            )
 
 
 sendQuery :
@@ -120,35 +180,6 @@ sendQuery queryDocument variables successTagger =
         |> Task.attempt (Result.Extra.unpack GraphQLClientError successTagger)
 
 
-queryPostByNodeId : GB.Document GB.Query Post { vars | nodeId : String }
-queryPostByNodeId =
-    let
-        nodeIdVar =
-            GBVar.required "nodeId" .nodeId GBVar.id
-
-        post =
-            GB.object Post
-                |> GB.with (GB.field "id" [] GB.int)
-                |> GB.with (GB.field "summary" [] (GB.nullable GB.string))
-
-        queryRoot =
-            GB.extract <|
-                (GB.field "post"
-                    [ ( "nodeId", GBArg.variable nodeIdVar ) ]
-                    post
-                )
-    in
-        GB.queryDocument queryRoot
-
-
-sendQuery1 : Cmd Msg
-sendQuery1 =
-    queryPostByNodeId
-        |> GB.request { nodeId = "WyJwb3N0cyIsMl0=" }
-        |> GraphQLClient.sendQuery "http://localhost:5000/graphql"
-        |> Task.attempt QueryResult
-
-
 main : Program Never Model Msg
 main =
     Html.program
@@ -159,29 +190,24 @@ main =
         }
 
 
-type alias Model =
-    { searchString : String
-    , posts : List Post
-    , persons : List Person
-    }
-
-
 type Msg
     = SearchString String
     | GraphQLClientError GraphQLClient.Error
-    | QueryPostsResult (List Post)
-    | QueryPersonsResult (List Person)
+    | QueryPostPageResult (Page Post)
+    | QueryPersonPageResult (Page Person)
 
 
 init : ( Model, Cmd Msg )
 init =
-    ( { posts = []
-      , persons = []
+    ( { posts = Nothing
+      , persons = Nothing
       , searchString = ""
       }
     , Cmd.batch
-        [ sendQuery querySearchPosts { search = "" } QueryPostsResult
-        , sendQuery queryAllPersonsWithAllPosts { } QueryPersonsResult
+        [ sendQuery querySearchPosts { search = "" } QueryPostPageResult
+        , sendQuery queryAllPersonsWithAllPosts {} QueryPersonPageResult
+          -- , sendQuery queryAllPosts {} QueryPostPageResult
+          -- , sendQuery queryAllPersons {} QueryPersonPageResult
         ]
     )
 
@@ -191,7 +217,7 @@ update msg model =
     case msg of
         SearchString str ->
             ( { model | searchString = str }
-            , sendQuery querySearchPosts { search = str } QueryPostsResult
+            , sendQuery querySearchPosts { search = str } QueryPostPageResult
             )
 
         GraphQLClientError graphQLClientError ->
@@ -201,13 +227,13 @@ update msg model =
             in
                 ( model, Cmd.none )
 
-        QueryPostsResult posts ->
-            ( { model | posts = posts }
+        QueryPostPageResult posts ->
+            ( { model | posts = Just posts }
             , Cmd.none
             )
 
-        QueryPersonsResult persons ->
-            ( { model | persons = persons }
+        QueryPersonPageResult persons ->
+            ( { model | persons = Just persons }
             , Cmd.none
             )
 
@@ -215,21 +241,29 @@ update msg model =
 view : Model -> Html Msg
 view model =
     Html.div []
-        [ {-
-          Html.input
+        [ Html.input
             [ Html.Attributes.placeholder "Search within posts"
             , Html.Events.onInput SearchString
             ]
             []
-        , Html.table [] <|
-            List.map
-                viewPost
-                model.posts
-        , -}
-          Html.table [] <|
-            List.map
-                viewPerson
-                model.persons
+        , case model.posts of
+            Nothing ->
+                Html.div [] [ Html.text "[posts ...]" ]
+
+            Just posts ->
+                Html.table [] <|
+                    List.map
+                        (.node >> viewPost)
+                        posts.edges
+        , case model.persons of
+            Nothing ->
+                Html.div [] [ Html.text "[persons ...]" ]
+
+            Just persons ->
+                Html.table [] <|
+                    List.map
+                        (.node >> viewPerson)
+                        persons.edges
         ]
 
 
@@ -238,17 +272,18 @@ viewPerson person =
     Html.tr []
         [ Html.td [] [ Html.text <| toString person.id ]
         , Html.td
-            [ Html.Attributes.style [ ("background-color", "linen")]]
+            [ Html.Attributes.style [ ( "background-color", "linen" ) ] ]
             [ Html.text <| person.firstName ]
-        , Html.td [] 
+        , Html.td []
             [ case person.posts of
                 Nothing ->
                     Html.text "[posts ...]"
+
                 Just posts ->
                     Html.table [] <|
                         List.map
-                            viewPost
-                            posts
+                            (.node >> viewPost)
+                            posts.edges
             ]
         ]
 
