@@ -1,10 +1,9 @@
 module Main exposing (main)
 
-import Json.Decode exposing (Decoder)
+import Result.Extra
 import Html exposing (Html)
 import Html.Attributes
 import Html.Events
-import Http
 import Task
 import GraphQL.Request.Builder as GB
 import GraphQL.Request.Builder.Arg as GBArg
@@ -18,8 +17,107 @@ type alias Post =
     }
 
 
-type alias Posts =
-    List Post
+
+type alias Person =
+    { id : Int
+    , firstName : String
+    , posts : Maybe (List Post)
+    }
+
+queryPostByNodeId : GB.Document GB.Query Post { vars | nodeId : String }
+queryPostByNodeId =
+    Post
+        |> GB.object
+        |> GB.with (GB.field "id" [] GB.int)
+        |> GB.with (GB.field "summary" [] (GB.nullable GB.string))
+        |> GB.field "post"
+            [ ( "nodeId"
+              , GBArg.variable <| GBVar.required "nodeId" .nodeId GBVar.id
+              )
+            ]
+        |> GB.extract
+        |> GB.queryDocument
+
+
+valueSpecPosts : GB.ValueSpec GB.NonNull GB.ObjectType (List Post) vars
+valueSpecPosts =
+    Post
+        |> GB.object
+        |> GB.with (GB.field "id" [] GB.int)
+        |> GB.with (GB.field "summary" [] (GB.nullable GB.string))
+        |> connectionNodes
+
+
+queryAllPosts : GB.Document GB.Query (List Post) vars
+queryAllPosts =
+    valueSpecPosts
+        |> GB.field "allPosts" []
+        |> GB.extract
+        |> GB.queryDocument
+
+
+querySearchPosts : GB.Document GB.Query (List Post) { vars | search : String }
+querySearchPosts =
+    valueSpecPosts
+        |> GB.field "searchPosts"
+            [ ( "search"
+              , GBArg.variable <| GBVar.required "search" .search GBVar.string
+              )
+            ]
+        |> GB.extract
+        |> GB.queryDocument
+
+
+queryAllPersons : GB.Document GB.Query (List Person) vars
+queryAllPersons =
+    (\id firstName -> Person id firstName Nothing)
+        |> GB.object
+        |> GB.with (GB.field "id" [] GB.int)
+        |> GB.with (GB.field "firstName" [] GB.string)
+        |> connectionNodes
+        |> GB.field "allPeople" []
+        |> GB.extract
+        |> GB.queryDocument
+
+
+queryAllPersonsWithAllPosts : GB.Document GB.Query (List Person) vars
+queryAllPersonsWithAllPosts =
+    Person
+        |> GB.object
+        |> GB.with (GB.field "id" [] GB.int)
+        |> GB.with (GB.field "firstName" [] GB.string)
+        |> GB.with (GB.field "postsByAuthorId" [] <| GB.map Just valueSpecPosts)
+        |> connectionNodes
+        |> GB.field "allPeople" []
+        |> GB.extract
+        |> GB.queryDocument
+
+
+
+{-| A function that helps you extract node objects from paginated Relay connections.
+-}
+connectionNodes :
+    GB.ValueSpec GB.NonNull GB.ObjectType result vars
+    -> GB.ValueSpec GB.NonNull GB.ObjectType (List result) vars
+connectionNodes spec =
+    spec
+        |> GB.field "node" []
+        |> GB.extract
+        |> GB.list
+        |> GB.field "edges" []
+        |> GB.extract
+
+
+sendQuery :
+    GB.Document GB.Query model vars
+    -> vars
+    -> (model -> Msg)
+    -> Cmd Msg
+sendQuery queryDocument variables successTagger =
+    queryDocument
+        |> GB.request variables
+        |> GraphQLClient.sendQuery "http://localhost:5000/graphql"
+        |> Task.attempt (Result.Extra.unpack GraphQLClientError successTagger)
 
 
 queryPostByNodeId : GB.Document GB.Query Post { vars | nodeId : String }
@@ -63,56 +161,53 @@ main =
 
 type alias Model =
     { searchString : String
-    , posts : Posts
-    , singlePost : Maybe Post
+    , posts : List Post
+    , persons : List Person
     }
 
 
 type Msg
     = SearchString String
-    | ApiResult (Result Http.Error Posts)
-    | QueryResult (Result GraphQLClient.Error Post)
+    | GraphQLClientError GraphQLClient.Error
+    | QueryPostsResult (List Post)
+    | QueryPersonsResult (List Person)
 
 
 init : ( Model, Cmd Msg )
 init =
     ( { posts = []
+      , persons = []
       , searchString = ""
-      , singlePost = Nothing
       }
-    , Cmd.batch [ getSearchPosts "", sendQuery1 ]
+    , Cmd.batch
+        [ sendQuery querySearchPosts { search = "" } QueryPostsResult
+        , sendQuery queryAllPersonsWithAllPosts { } QueryPersonsResult
+        ]
     )
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        SearchString string ->
-            ( { model | searchString = string }
-            , getSearchPosts string
+        SearchString str ->
+            ( { model | searchString = str }
+            , sendQuery querySearchPosts { search = str } QueryPostsResult
             )
 
-        ApiResult (Ok posts) ->
+        GraphQLClientError graphQLClientError ->
+            let
+                _ =
+                    Debug.log "... GraphQLClient Error" graphQLClientError
+            in
+                ( model, Cmd.none )
+
+        QueryPostsResult posts ->
             ( { model | posts = posts }
             , Cmd.none
             )
 
-        ApiResult (Err httpError) ->
-            let
-                _ =
-                    Debug.log "ApiResult Http Error" httpError
-            in
-                ( model, Cmd.none )
-
-        QueryResult (Err graphQLClientError) ->
-            let
-                _ =
-                    Debug.log "QueryResult GraphQLClient Error" graphQLClientError
-            in
-                ( model, Cmd.none )
-
-        QueryResult (Ok post) ->
-            ( { model | singlePost = Just post }
+        QueryPersonsResult persons ->
+            ( { model | persons = persons }
             , Cmd.none
             )
 
@@ -120,8 +215,8 @@ update msg model =
 view : Model -> Html Msg
 view model =
     Html.div []
-        [ Html.div [] [ Html.text (toString model.singlePost) ]
-        , Html.input
+        [ {-
+          Html.input
             [ Html.Attributes.placeholder "Search within posts"
             , Html.Events.onInput SearchString
             ]
@@ -130,6 +225,31 @@ view model =
             List.map
                 viewPost
                 model.posts
+        , -}
+          Html.table [] <|
+            List.map
+                viewPerson
+                model.persons
+        ]
+
+
+viewPerson : Person -> Html Msg
+viewPerson person =
+    Html.tr []
+        [ Html.td [] [ Html.text <| toString person.id ]
+        , Html.td
+            [ Html.Attributes.style [ ("background-color", "linen")]]
+            [ Html.text <| person.firstName ]
+        , Html.td [] 
+            [ case person.posts of
+                Nothing ->
+                    Html.text "[posts ...]"
+                Just posts ->
+                    Html.table [] <|
+                        List.map
+                            viewPost
+                            posts
+            ]
         ]
 
 
@@ -139,26 +259,3 @@ viewPost post =
         [ Html.td [] [ Html.text <| toString post.id ]
         , Html.td [] [ Html.text <| Maybe.withDefault "[no summary]" post.summary ]
         ]
-
-
-getSearchPosts : String -> Cmd Msg
-getSearchPosts searchString =
-    Http.post
-        "http://localhost:5000/graphql"
-        (Http.stringBody
-            "application/graphql"
-            ("query { searchPosts(search: \""
-                ++ searchString
-                ++ "\") { nodes { id summary } } }"
-            )
-        )
-        (Json.Decode.at [ "data", "searchPosts", "nodes" ] decoderListOfPosts)
-        |> Http.send ApiResult
-
-
-decoderListOfPosts : Decoder Posts
-decoderListOfPosts =
-    Json.Decode.list <|
-        Json.Decode.map2 Post
-            (Json.Decode.field "id" Json.Decode.int)
-            (Json.Decode.field "summary" <| Json.Decode.maybe Json.Decode.string)
